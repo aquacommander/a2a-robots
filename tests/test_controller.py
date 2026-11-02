@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 from helpers import make_limits, pose
@@ -15,6 +16,20 @@ def req(skill: str, **args):
 
 def right_position(backend: FakeBackend):
     return backend.observe()["right"].pose.position
+
+
+class BlockingHoldBackend(FakeBackend):
+    """``hold`` blocks until the test releases it, like a slow real freeze."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.hold_started = threading.Event()
+        self.release_hold = threading.Event()
+
+    def hold(self) -> None:
+        self.hold_started.set()
+        self.release_hold.wait(5)
+        super().hold()
 
 
 async def test_observe_reports_every_hand_in_the_result_schema(controller):
@@ -126,6 +141,51 @@ async def test_cancelling_the_task_stops_the_backend_thread():
     assert right_position(backend)[2] == z
     assert backend.hold_calls == 1
     assert (await controller.run(req("open", hand="right"), "t2")).success
+
+
+async def test_no_motion_starts_while_an_idle_stop_is_freezing():
+    backend = BlockingHoldBackend()
+    controller = RobotController(backend, make_limits())
+    stop = asyncio.create_task(controller.run(req("stop"), "t1"))
+    assert await asyncio.to_thread(backend.hold_started.wait, 1)
+    before = right_position(backend)
+
+    busy = await controller.run(req("move_to", hand="right", pose=pose(0.3, 0.1, 0.13)), "t2")
+
+    assert busy.failure_code is FailureCode.BUSY
+    assert right_position(backend) == before
+    backend.release_hold.set()
+    assert (await stop).success
+    assert (await controller.run(req("open", hand="right"), "t3")).success
+
+
+async def test_no_motion_starts_after_a_preempted_motion_until_the_freeze_ends():
+    backend = BlockingHoldBackend(steps=100)
+    controller = RobotController(backend, make_limits())
+    move = asyncio.create_task(
+        controller.run(req("move_to", hand="right", pose=pose(0.3, 0.1, 0.14)), "t1")
+    )
+    await asyncio.sleep(0.05)
+    stop = asyncio.create_task(controller.run(req("stop"), "t2"))
+    assert await asyncio.to_thread(backend.hold_started.wait, 1)
+
+    # The stopped motion has released its busy flag, but hold() is still running.
+    assert (await move).failure_code is FailureCode.STOPPED
+    busy = await controller.run(req("open", hand="right"), "t3")
+
+    assert busy.failure_code is FailureCode.BUSY
+    backend.release_hold.set()
+    assert (await stop).success
+    assert (await controller.run(req("open", hand="right"), "t4")).success
+
+
+async def test_cancel_without_a_task_id_stops_a_motion_started_without_one():
+    backend = FakeBackend(steps=100, step_time_s=0.01)
+    controller = RobotController(backend, make_limits())
+    move = asyncio.create_task(controller.run(req("open", hand="right"), None))
+    await asyncio.sleep(0.05)
+    controller.cancel(None)
+    assert (await asyncio.wait_for(move, 0.5)).failure_code is FailureCode.STOPPED
 
 
 async def test_cancel_for_another_task_does_not_stop_the_motion():

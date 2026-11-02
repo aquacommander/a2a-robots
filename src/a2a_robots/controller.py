@@ -25,6 +25,7 @@ class RobotController:
         self.limits = limits
         self._stop = threading.Event()
         self._busy_task: str | None = None
+        self._stopping = 0
         self._worker: asyncio.Future[MotionOutcome] | None = None
 
     async def run(self, request: SkillRequest, task_id: str | None) -> SkillResult:
@@ -36,14 +37,23 @@ class RobotController:
         return await self._run_motion(request, task_id)
 
     async def stop(self) -> None:
-        """Stop any motion now and freeze every hand where it is."""
-        self._stop.set()
-        await self._wait_for_worker()
-        await asyncio.to_thread(self.backend.hold)
+        """Stop any motion now and freeze every hand where it is.
+
+        No motion can start until the hands are frozen, including in the gap
+        after a stopped motion releases the busy flag and before ``hold`` ends.
+        """
+        self._stopping += 1
+        try:
+            self._stop.set()
+            await self._wait_for_worker()
+            await asyncio.to_thread(self.backend.hold)
+        finally:
+            self._stopping -= 1
 
     def cancel(self, task_id: str | None) -> None:
         """Stop the motion started by ``task_id``, if it is the one running."""
-        if task_id is not None and task_id == self._busy_task:
+        # A run without a task id is stored as "", so None matches it here.
+        if (task_id or "") == self._busy_task:
             self._stop.set()
 
     async def aclose(self) -> None:
@@ -54,6 +64,8 @@ class RobotController:
         if request.pose is not None and request.pose.frame != self.limits.workspace.frame:
             raise RequestError(f'pose.frame must be "{self.limits.workspace.frame}"')
         # No await between this check and claiming the flag, so it is atomic on the loop.
+        if self._stopping:
+            return await self._result(request.skill, FailureCode.BUSY, "the robot is stopping")
         if self._busy_task is not None:
             return await self._result(
                 request.skill, FailureCode.BUSY, "another skill is running on this robot"
