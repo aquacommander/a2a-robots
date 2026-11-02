@@ -1,0 +1,120 @@
+"""Runs skills on one robot: busy flag, preemption, timeouts, results.
+
+One controller owns one backend, so every chat served by the process shares
+the same busy flag and two chats cannot move the same robot at once.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import functools
+import logging
+import threading
+
+from .backend import MotionOutcome, RobotBackend
+from .limits import SafetyLimits
+from .skills import FailureCode, RequestError, Skill, SkillRequest, SkillResult
+
+logger = logging.getLogger(__name__)
+
+
+class RobotController:
+    def __init__(self, backend: RobotBackend, limits: SafetyLimits) -> None:
+        self.backend = backend
+        self.limits = limits
+        self._stop = threading.Event()
+        self._busy_task: str | None = None
+        self._worker: asyncio.Future[MotionOutcome] | None = None
+
+    async def run(self, request: SkillRequest, task_id: str | None) -> SkillResult:
+        if request.skill is Skill.OBSERVE:
+            return await self._result(request.skill)
+        if request.skill is Skill.STOP:
+            await self.stop()
+            return await self._result(request.skill)
+        return await self._run_motion(request, task_id)
+
+    async def stop(self) -> None:
+        """Stop any motion now and freeze every hand where it is."""
+        self._stop.set()
+        await self._wait_for_worker()
+        await asyncio.to_thread(self.backend.hold)
+
+    def cancel(self, task_id: str | None) -> None:
+        """Stop the motion started by ``task_id``, if it is the one running."""
+        if task_id is not None and task_id == self._busy_task:
+            self._stop.set()
+
+    async def aclose(self) -> None:
+        await self.stop()
+        await asyncio.to_thread(self.backend.shutdown)
+
+    async def _run_motion(self, request: SkillRequest, task_id: str | None) -> SkillResult:
+        if request.pose is not None and request.pose.frame != self.limits.workspace.frame:
+            raise RequestError(f'pose.frame must be "{self.limits.workspace.frame}"')
+        # No await between this check and claiming the flag, so it is atomic on the loop.
+        if self._busy_task is not None:
+            return await self._result(
+                request.skill, FailureCode.BUSY, "another skill is running on this robot"
+            )
+        self._busy_task = task_id or ""
+        self._stop.clear()
+        try:
+            if request.skill is Skill.MOVE_TO:
+                assert request.hand is not None and request.pose is not None
+                states = await asyncio.to_thread(self.backend.observe)
+                refusal = self.limits.check_move(states[request.hand].pose, request.pose)
+                if refusal is not None:
+                    return await self._result(request.skill, *refusal, limits=True)
+                call = functools.partial(
+                    self.backend.move_to, request.hand, request.pose, self._stop
+                )
+            elif request.skill is Skill.OPEN:
+                call = functools.partial(self.backend.open, request.hand, self._stop)
+            else:
+                call = functools.partial(self.backend.close, request.hand, self._stop)
+            outcome = await self._run_worker(call)
+            return await self._result(request.skill, outcome.failure_code, outcome.detail)
+        finally:
+            self._busy_task = None
+
+    async def _run_worker(self, call: functools.partial[MotionOutcome]) -> MotionOutcome:
+        self._worker = asyncio.ensure_future(asyncio.to_thread(call))
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._worker), self.limits.skill_timeout_s)
+        except TimeoutError:
+            await self.stop()
+            return MotionOutcome(
+                FailureCode.TIMEOUT, f"skill exceeded {self.limits.skill_timeout_s} s"
+            )
+        except asyncio.CancelledError:
+            # tasks/cancel cancels this coroutine, not the thread: stop the hand too.
+            await asyncio.shield(self.stop())
+            raise
+
+    async def _wait_for_worker(self) -> None:
+        worker = self._worker
+        if worker is not None and not worker.done():
+            with contextlib.suppress(Exception):
+                await asyncio.shield(worker)
+
+    async def _result(
+        self,
+        skill: Skill,
+        failure_code: FailureCode | None = None,
+        detail: str | None = None,
+        *,
+        limits: bool = False,
+    ) -> SkillResult:
+        states = await asyncio.to_thread(self.backend.observe)
+        return SkillResult(
+            skill=skill,
+            success=failure_code is None,
+            failure_code=failure_code,
+            detail=detail,
+            final_pose={hand: s.pose.to_dict() for hand, s in states.items()},
+            contact={hand: dict(s.contact) for hand, s in states.items()},
+            held={hand: s.held for hand, s in states.items()},
+            limits=self.limits.as_dict() if limits else None,
+        )

@@ -1,0 +1,131 @@
+"""End to end over JSON-RPC: a client drives the fake robot through the A2A server."""
+
+import asyncio
+import json
+import uuid
+
+import httpx
+import pytest
+from a2a_adapter import to_a2a
+from helpers import make_limits, pose
+
+from a2a_robots import FakeBackend, RobotAdapter
+
+
+@pytest.fixture
+def backend():
+    return FakeBackend(steps=200, step_time_s=0.01)
+
+
+@pytest.fixture
+async def client(backend):
+    app = to_a2a(RobotAdapter(backend, make_limits(), name="Fake robot"))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://robot"
+    ) as http:
+        yield http
+
+
+async def rpc(client, method, params):
+    response = await client.post(
+        "/", json={"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": method, "params": params}
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def message(*parts):
+    return {"message": {"role": "user", "messageId": uuid.uuid4().hex, "parts": list(parts)}}
+
+
+def data_part(skill, **args):
+    return {"kind": "data", "data": {"skill": skill, "args": args}}
+
+
+def text_part(skill, **args):
+    return {"kind": "text", "text": json.dumps({"skill": skill, "args": args})}
+
+
+def result_of(task):
+    """The skill result from the artifact's data part, checked against its text twin."""
+    parts = task["artifacts"][0]["parts"]
+    data = next(p["data"] for p in parts if p["kind"] == "data")
+    text = next(p["text"] for p in parts if p["kind"] == "text")
+    assert json.loads(text) == data
+    assert json.loads(task["status"]["message"]["parts"][0]["text"]) == data
+    return data
+
+
+@pytest.mark.parametrize("part", [data_part("observe"), text_part("observe")])
+async def test_observe_over_json_rpc(client, part):
+    task = (await rpc(client, "message/send", message(part)))["result"]
+    assert task["status"]["state"] == "completed"
+    result = result_of(task)
+    assert result["success"] is True
+    assert set(result["final_pose"]) == {"left", "right"}
+
+
+async def test_a2a_1_0_send_message_with_data_part(client):
+    params = {
+        "message": {
+            "role": "ROLE_USER",
+            "messageId": uuid.uuid4().hex,
+            "parts": [{"data": {"skill": "observe"}}],
+        }
+    }
+    reply = await client.post(
+        "/",
+        json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": params},
+        headers={"A2A-Version": "1.0"},
+    )
+    task = reply.json()["result"]["task"]
+    assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+    data = next(p["data"] for p in task["artifacts"][0]["parts"] if "data" in p)
+    assert data["success"] is True
+
+
+async def test_malformed_request_fails_the_task_without_moving(client, backend):
+    before = backend.observe()
+    task = (await rpc(client, "message/send", message({"kind": "text", "text": "wave hello"})))[
+        "result"
+    ]
+    assert task["status"]["state"] == "failed"
+    assert "send the request as JSON" in task["status"]["message"]["parts"][0]["text"]
+    assert backend.observe() == before
+
+
+async def test_oversized_move_completes_with_step_too_large(client):
+    part = data_part("move_to", hand="right", pose=pose(0.3, 0.1, 0.4))
+    result = result_of((await rpc(client, "message/send", message(part)))["result"])
+    assert result["success"] is False
+    assert result["failure_code"] == "step_too_large"
+    assert result["limits"]["max_step_m"] == 0.05
+
+
+async def test_stop_preempts_a_move_sent_by_another_client(client, backend):
+    move = asyncio.create_task(
+        rpc(
+            client,
+            "message/send",
+            message(data_part("move_to", hand="right", pose=pose(0.3, 0.1, 0.14))),
+        )
+    )
+    await asyncio.sleep(0.2)
+    stopped = result_of((await rpc(client, "message/send", message(data_part("stop"))))["result"])
+    moved = result_of((await asyncio.wait_for(move, 1))["result"])
+
+    assert stopped["success"] is True
+    assert moved["failure_code"] == "stopped"
+    assert backend.hold_calls == 1
+
+
+async def test_agent_card_lists_skills_with_examples_and_json_modes(client):
+    card = (await client.get("/.well-known/agent-card.json")).json()
+    assert card["name"] == "Fake robot"
+    assert "application/json" in card["defaultInputModes"]
+    assert "application/json" in card["defaultOutputModes"]
+    skills = {s["id"]: s for s in card["skills"]}
+    assert set(skills) == {"observe", "move_to", "open", "close", "stop"}
+    for skill in skills.values():
+        assert json.loads(skill["examples"][0])["skill"] == skill["id"]
+        assert "Request:" in skill["description"] and "Response:" in skill["description"]
