@@ -2,7 +2,12 @@
 
 Expose a robot as an [A2A](https://a2a-protocol.org) agent. An agent plans the work and sends one task-level skill at a time; the adapter validates each request, enforces safety limits, runs the skill on the robot backend, and returns a fixed result format.
 
-Built on [a2a-adapter](https://github.com/hybroai/a2a-adapter). Early development: the core and a fake robot are here; MuJoCo and Sharpa backends come next.
+Built on [a2a-adapter](https://github.com/hybroai/a2a-adapter). Early development.
+
+| Package | What it is |
+| --- | --- |
+| `a2a-robots` (this directory) | The core: skills, safety limits, the controller, the A2A adapter, and `FakeBackend`. |
+| [`a2a-robots-sharpa`](packages/a2a-robots-sharpa) | Sharpa Wave hands, simulated in MuJoCo. |
 
 ## Skills
 
@@ -59,14 +64,15 @@ curl -s http://127.0.0.1:9100/ -H 'Content-Type: application/json' -d '{
 
 This repository is a monorepo. The shared package stays `a2a-robots`; each real robot is a sibling package named `a2a-robots-<name>` (for example `a2a-robots-sharpa`) that depends on it. `FakeBackend` stays in the core package only as a dependency-free test double.
 
-A robot package subclasses `RobotBackend` and implements `hands`, `observe`, `move_to`, `open`, `close`, `hold` and `shutdown`. Motion methods are synchronous, run in a worker thread, and must check the `stop` event at every control step and return `MotionOutcome(FailureCode.STOPPED)` once it is set. See `src/a2a_robots/fake.py`.
+A robot package subclasses `RobotBackend` and implements `hands`, `observe`, `move_to`, `open`, `close`, `hold` and `shutdown`. Motion methods are synchronous, run in a worker thread, and must check the `stop` event at every control step and return `MotionOutcome(FailureCode.STOPPED)` once it is set. See `src/a2a_robots/fake.py` and `packages/a2a-robots-sharpa`.
 
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync --all-packages --extra dev
 uv run ruff format --check . && uv run ruff check .
 uv run pytest
+uv run pytest packages/a2a-robots-sharpa
 ```
 
 ## License
