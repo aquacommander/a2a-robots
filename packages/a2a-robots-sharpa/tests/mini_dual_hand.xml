@@ -1,0 +1,123 @@
+<!-- A mesh-free stand-in for dual_sharpa_wave.xml with the same naming:
+     a 6-DoF floating base per hand, a palm, and three fingers. -->
+<mujoco model="mini_dual_hand">
+  <compiler angle="radian"/>
+  <option timestep="0.002"/>
+  <default>
+    <joint damping="0.05" armature="0.001"/>
+    <geom contype="1" conaffinity="1" friction="1 0.005 0.0001"/>
+    <default class="base">
+      <joint armature="0.1" range="-2 2"/>
+      <position kp="300" dampratio="1" inheritrange="1"/>
+    </default>
+    <default class="rot">
+      <joint armature="0.01" range="-3.1416 3.1416"/>
+      <position kp="30" dampratio="1" inheritrange="1"/>
+    </default>
+    <default class="finger">
+      <position kp="2" dampratio="1" inheritrange="1"/>
+    </default>
+  </default>
+  <worldbody>
+    <body name="dual_sharpa_wave">
+      <body name="left_root_1">
+        <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+        <joint name="left_x_joint" type="slide" axis="1 0 0" class="base"/>
+        <body name="left_root_2" pos="0 -0.15 0">
+          <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+          <joint name="left_y_joint" type="slide" axis="0 1 0" class="base"/>
+          <body name="left_root_3">
+            <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+            <joint name="left_z_joint" type="slide" axis="0 0 1" class="base"/>
+            <body name="left_root_4">
+              <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+              <joint name="left_roll_joint" axis="1 0 0" class="rot"/>
+              <body name="left_root_5">
+                <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+                <joint name="left_pitch_joint" axis="0 1 0" class="rot"/>
+                <body name="left_hand_C_MC">
+                  <joint name="left_yaw_joint" axis="0 0 1" class="rot"/>
+                  <geom name="left_palm" type="box" size="0.01 0.04 0.05" pos="-0.01 0 0.05" mass="0.2"/>
+                  <body name="left_thumb_DP" pos="0 0 0.08">
+                    <joint name="left_thumb_IP" axis="0 1 0" range="0 1.6"/>
+                    <geom type="capsule" fromto="0 0 0 0 0 0.04" size="0.006" mass="0.01"/>
+                  </body>
+                  <body name="left_index_MCP_VL" pos="0 0 0.1">
+                    <joint name="left_index_MCP_AA" axis="1 0 0" range="-0.3 0.3"/>
+                    <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+                    <body name="left_index_DP">
+                      <joint name="left_index_PIP" axis="0 1 0" range="0 1.6"/>
+                      <geom type="capsule" fromto="0 0 0 0 0 0.05" size="0.006" mass="0.01"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_root_1">
+        <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+        <joint name="right_x_joint" type="slide" axis="1 0 0" class="base"/>
+        <body name="right_root_2" pos="0 0.15 0">
+          <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+          <joint name="right_y_joint" type="slide" axis="0 1 0" class="base"/>
+          <body name="right_root_3">
+            <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+            <joint name="right_z_joint" type="slide" axis="0 0 1" class="base"/>
+            <body name="right_root_4">
+              <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+              <joint name="right_roll_joint" axis="1 0 0" class="rot"/>
+              <body name="right_root_5">
+                <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+                <joint name="right_pitch_joint" axis="0 1 0" class="rot"/>
+                <body name="right_hand_C_MC">
+                  <joint name="right_yaw_joint" axis="0 0 1" class="rot"/>
+                  <geom name="right_palm" type="box" size="0.01 0.04 0.05" pos="-0.01 0 0.05" mass="0.2"/>
+                  <body name="right_thumb_DP" pos="0 0 0.08">
+                    <joint name="right_thumb_IP" axis="0 1 0" range="0 1.6"/>
+                    <geom type="capsule" fromto="0 0 0 0 0 0.04" size="0.006" mass="0.01"/>
+                  </body>
+                  <body name="right_index_MCP_VL" pos="0 0 0.1">
+                    <joint name="right_index_MCP_AA" axis="1 0 0" range="-0.3 0.3"/>
+                    <inertial pos="0 0 0" mass="1e-3" diaginertia="1e-6 1e-6 1e-6"/>
+                    <body name="right_index_DP">
+                      <joint name="right_index_PIP" axis="0 1 0" range="0 1.6"/>
+                      <geom type="capsule" fromto="0 0 0 0 0 0.05" size="0.006" mass="0.01"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <exclude body1="left_hand_C_MC" body2="left_thumb_DP"/>
+    <exclude body1="left_index_MCP_VL" body2="left_index_DP"/>
+    <exclude body1="right_hand_C_MC" body2="right_thumb_DP"/>
+    <exclude body1="right_index_MCP_VL" body2="right_index_DP"/>
+  </contact>
+  <actuator>
+    <position name="left_x_joint_ctrl" joint="left_x_joint" class="base"/>
+    <position name="left_y_joint_ctrl" joint="left_y_joint" class="base"/>
+    <position name="left_z_joint_ctrl" joint="left_z_joint" class="base"/>
+    <position name="left_roll_joint_ctrl" joint="left_roll_joint" class="rot"/>
+    <position name="left_pitch_joint_ctrl" joint="left_pitch_joint" class="rot"/>
+    <position name="left_yaw_joint_ctrl" joint="left_yaw_joint" class="rot"/>
+    <position name="left_thumb_IP_ctrl" joint="left_thumb_IP" class="finger"/>
+    <position name="left_index_MCP_AA_ctrl" joint="left_index_MCP_AA" class="finger"/>
+    <position name="left_index_PIP_ctrl" joint="left_index_PIP" class="finger"/>
+    <position name="right_x_joint_ctrl" joint="right_x_joint" class="base"/>
+    <position name="right_y_joint_ctrl" joint="right_y_joint" class="base"/>
+    <position name="right_z_joint_ctrl" joint="right_z_joint" class="base"/>
+    <position name="right_roll_joint_ctrl" joint="right_roll_joint" class="rot"/>
+    <position name="right_pitch_joint_ctrl" joint="right_pitch_joint" class="rot"/>
+    <position name="right_yaw_joint_ctrl" joint="right_yaw_joint" class="rot"/>
+    <position name="right_thumb_IP_ctrl" joint="right_thumb_IP" class="finger"/>
+    <position name="right_index_MCP_AA_ctrl" joint="right_index_MCP_AA" class="finger"/>
+    <position name="right_index_PIP_ctrl" joint="right_index_PIP" class="finger"/>
+  </actuator>
+</mujoco>
