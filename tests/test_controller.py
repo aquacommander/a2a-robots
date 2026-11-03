@@ -4,7 +4,7 @@ import threading
 import pytest
 from helpers import make_limits, pose
 
-from a2a_robots import FailureCode, FakeBackend, RequestError, RobotController, Skill
+from a2a_robots import FailureCode, FakeBackend, Pose, RequestError, RobotController, Skill
 from a2a_robots.skills import parse_request
 
 HANDS = frozenset({"left", "right"})
@@ -186,6 +186,78 @@ async def test_cancel_without_a_task_id_stops_a_motion_started_without_one():
     await asyncio.sleep(0.05)
     controller.cancel(None)
     assert (await asyncio.wait_for(move, 0.5)).failure_code is FailureCode.STOPPED
+
+
+class SettlesShortBackend(FakeBackend):
+    """Like a real controller, stops a little short of each target (0.6 mm in x)."""
+
+    def move_to(self, hand, target, stop):
+        outcome = super().move_to(hand, target, stop)
+        if outcome.failure_code is None:
+            with self._lock:
+                p = self._state[hand].pose
+                x, y, z = p.position
+                self._state[hand].pose = Pose(p.frame, (x - 0.0006, y, z), p.orientation)
+        return outcome
+
+
+def step_x(dx: float, start: float = 0.3):
+    return req("move_to", hand="right", pose=pose(start + dx, 0.1, 0.1))
+
+
+async def test_full_step_after_a_successful_move_is_measured_from_its_target():
+    backend = SettlesShortBackend()
+    controller = RobotController(backend, make_limits())
+    assert (await controller.run(step_x(0.04), "t1")).success
+
+    # 0.0499 m from the last target, but 0.0505 m from where the hand stopped.
+    result = await controller.run(step_x(0.0899), "t2")
+
+    assert result.success
+    assert right_position(backend)[0] == pytest.approx(0.3893)
+
+
+async def test_steps_are_measured_from_the_observed_pose_after_a_stop():
+    backend = SettlesShortBackend(steps=100, step_time_s=0.01)
+    controller = RobotController(backend, make_limits())
+    move = asyncio.create_task(controller.run(step_x(0.05), "t1"))
+    await asyncio.sleep(0.1)
+    await controller.run(req("stop"), "t2")
+    assert (await move).failure_code is FailureCode.STOPPED
+
+    # Within one step of the stopped move's target, but not of where the hand is.
+    result = await controller.run(step_x(0.09), "t3")
+
+    assert result.failure_code is FailureCode.STEP_TOO_LARGE
+
+
+@pytest.mark.parametrize("skill", ["open", "close"])
+async def test_steps_are_measured_from_the_observed_pose_after_the_fingers_move(skill):
+    backend = SettlesShortBackend()
+    controller = RobotController(backend, make_limits())
+    assert (await controller.run(step_x(0.04), "t1")).success
+    assert (await controller.run(req(skill, hand="right"), "t2")).success
+
+    result = await controller.run(step_x(0.0899), "t3")
+
+    assert result.failure_code is FailureCode.STEP_TOO_LARGE
+
+
+async def test_a_refused_move_keeps_the_last_target():
+    backend = SettlesShortBackend()
+    controller = RobotController(backend, make_limits())
+    assert (await controller.run(step_x(0.04), "t1")).success
+    assert (await controller.run(step_x(0.2), "t2")).failure_code is FailureCode.STEP_TOO_LARGE
+    assert (await controller.run(step_x(0.0899), "t3")).success
+
+
+async def test_the_last_target_is_per_hand():
+    backend = SettlesShortBackend()
+    controller = RobotController(backend, make_limits())
+    assert (await controller.run(step_x(0.04), "t1")).success
+    left = backend.observe()["left"].pose.position
+    far_left = req("move_to", hand="left", pose=pose(left[0] + 0.0506, left[1], left[2]))
+    assert (await controller.run(far_left, "t2")).failure_code is FailureCode.STEP_TOO_LARGE
 
 
 async def test_cancel_for_another_task_does_not_stop_the_motion():

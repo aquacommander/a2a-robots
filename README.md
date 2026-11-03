@@ -41,6 +41,7 @@ Every skill returns the same result, as JSON text and as an `application/json` d
 ## Safety
 
 - A move larger than `max_step_m` or `max_step_rad`, or a target outside the workspace box, is refused before anything moves. The result includes the limits. Moves are never clamped.
+- A step is measured from the hand's last target when its last skill was a successful `move_to`, because a robot settles within a small tolerance of the target, not exactly on it. After anything else (a failed move, a stop, a timeout, a cancel, or `open`/`close` on that hand) it is measured from the observed pose. So the hand moves at most `max_step_m` plus the backend's settle tolerance.
 - One skill runs at a time per robot. A second motion request fails at once with `busy` instead of queueing.
 - `stop`, `tasks/cancel`, timeouts and shutdown all stop the backend. Backends run in a worker thread and poll a stop flag every control step, so stopping does not depend on cancelling a Python task.
 - The adapter checks only the target pose. The path to it is the planner's job (see below); `MujocoPlanner` rejects paths that collide with the simulated scene. Real hardware also needs the robot's own safety checks.
