@@ -31,6 +31,6 @@ backend = SharpaMujocoBackend(load_model(spec))
 The unit tests use `tests/mini_dual_hand.xml`, a mesh-free model with the same joint and body names, so they need no download. `test_real_sharpa_model_moves_and_grasps` runs against the real model when `SHARPA_MODEL_DIR` is set:
 
 ```bash
-uv run python -m a2a_robots_sharpa.model ~/.cache/a2a-robots/sharpa-wave
+uv run python -m a2a_robots_sharpa ~/.cache/a2a-robots/sharpa-wave
 SHARPA_MODEL_DIR=~/.cache/a2a-robots/sharpa-wave uv run pytest packages/a2a-robots-sharpa
 ```

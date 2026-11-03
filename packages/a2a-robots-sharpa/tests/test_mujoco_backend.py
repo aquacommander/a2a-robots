@@ -180,7 +180,7 @@ async def test_controller_refuses_an_oversized_move_and_runs_a_grasp():
 
 
 # The real Sharpa Wave model. CI downloads it; locally run
-#   uv run python -m a2a_robots_sharpa.model <dir>
+#   uv run python -m a2a_robots_sharpa <dir>
 # and set SHARPA_MODEL_DIR=<dir>.
 REAL_MODEL_DIR = os.environ.get("SHARPA_MODEL_DIR")
 

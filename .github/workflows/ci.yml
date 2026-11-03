@@ -28,7 +28,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/sharpa-model
           key: sharpa-model-${{ hashFiles('packages/a2a-robots-sharpa/src/a2a_robots_sharpa/model.py') }}
-      - run: uv run python -m a2a_robots_sharpa.model ${{ runner.temp }}/sharpa-model
+      - run: uv run python -m a2a_robots_sharpa ${{ runner.temp }}/sharpa-model
       - run: uv run pytest packages/a2a-robots-sharpa
         env:
           SHARPA_MODEL_DIR: ${{ runner.temp }}/sharpa-model

@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import io
 import shutil
-import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -87,7 +86,3 @@ def _digest(root: Path) -> str:
         if p.is_file()
     )
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
-
-
-if __name__ == "__main__":
-    print(fetch_model(sys.argv[1] if len(sys.argv) > 1 else None))
