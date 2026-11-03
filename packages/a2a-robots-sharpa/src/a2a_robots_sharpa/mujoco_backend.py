@@ -6,7 +6,9 @@ base driven by the position actuators ``<hand>_{x,y,z,roll,pitch,yaw}_joint_ctrl
 a palm body ``<hand>_hand_C_MC``, and finger joints ``<hand>_<finger>_*``, each
 with a ``<joint>_ctrl`` position actuator.
 
-The hand pose is the palm body frame in world coordinates. The simulation only
+The hand pose is the palm body frame in world coordinates. ``move_to`` asks a
+planner for a joint trajectory and streams it one target per control step, the
+way a real arm takes joint targets from a host-side planner. The simulation only
 advances while a motion runs, so the scene is frozen between skills.
 """
 
@@ -22,6 +24,9 @@ import mujoco
 import numpy as np
 
 from a2a_robots import FailureCode, HandState, MotionOutcome, Pose, RobotBackend
+from a2a_robots.planning import PlanError, Planner
+
+from .planner import Chain, MujocoPlanner
 
 BASE_JOINTS = ("x", "y", "z", "roll", "pitch", "yaw")
 PALM = "palm"
@@ -30,6 +35,7 @@ PALM = "palm"
 @dataclass(frozen=True, slots=True)
 class _Hand:
     palm_body: int
+    base_joints: tuple[str, ...]
     base_qpos: np.ndarray
     base_dofs: np.ndarray
     base_actuators: np.ndarray
@@ -54,10 +60,12 @@ class SharpaMujocoBackend(RobotBackend):
         position_tolerance_m: float = 0.002,
         orientation_tolerance_rad: float = 0.02,
         grasp_closure: float = 0.6,
+        planner: Planner | None = None,
     ) -> None:
         """``realtime`` paces the simulation to wall-clock time; tests turn it off.
         ``grasp_closure`` is how far ``close`` bends the flexion joints, as a
-        fraction of their range."""
+        fraction of their range. ``planner`` defaults to a ``MujocoPlanner`` on
+        the same model, which checks the path against the simulated scene."""
         self._model = model
         self._data = mujoco.MjData(model)
         self._frame = frame
@@ -68,6 +76,10 @@ class SharpaMujocoBackend(RobotBackend):
         self._pos_tol = position_tolerance_m
         self._rot_tol = orientation_tolerance_rad
         self._hands = {name: self._index_hand(name, grasp_closure) for name in hands}
+        self._planner = planner or MujocoPlanner(
+            model,
+            {name: Chain(f"{name}_hand_C_MC", h.base_joints) for name, h in self._hands.items()},
+        )
         self._lock = threading.Lock()
         with self._lock:
             mujoco.mj_forward(self._model, self._data)
@@ -84,18 +96,28 @@ class SharpaMujocoBackend(RobotBackend):
     def move_to(self, hand: str, target: Pose, stop: threading.Event) -> MotionOutcome:
         h = self._hands[hand]
         with self._lock:
-            goal = self._solve_base(h, target)
-        if goal is None:
-            return MotionOutcome(FailureCode.UNREACHABLE, "no base pose reaches the target")
+            start = dict(zip(h.base_joints, self._data.qpos[h.base_qpos], strict=True))
+            if isinstance(self._planner, MujocoPlanner):
+                self._planner.set_scene(self._data.qpos)
+            try:
+                trajectory = self._planner.plan(hand, start, target, self._control_dt)
+            except PlanError as error:
+                return MotionOutcome(error.failure_code, error.detail)
+        if trajectory.joints != h.base_joints:
+            raise ValueError(f"planner returned joints {trajectory.joints}, not {h.base_joints}")
+        points = iter(trajectory.points)
 
-        def reached() -> bool:
+        def track() -> bool:
+            # Stream the next target each control step, then wait for the hand to settle.
+            point = next(points, None)
+            if point is not None:
+                self._data.ctrl[h.base_actuators] = point
+                return False
             pos_err, rot_err = self._pose_error(h, target)
             speed = np.abs(self._data.qvel[h.base_dofs]).max()
             return pos_err <= self._pos_tol and rot_err <= self._rot_tol and speed < 1e-2
 
-        with self._lock:
-            self._data.ctrl[h.base_actuators] = goal
-        if self._run(stop, reached):
+        if self._run(stop, track, extra_steps=len(trajectory.points)):
             return MotionOutcome()
         if stop.is_set():
             return MotionOutcome(FailureCode.STOPPED, "stopped before reaching the target")
@@ -155,13 +177,14 @@ class SharpaMujocoBackend(RobotBackend):
             return MotionOutcome(FailureCode.STOPPED, "stopped while moving the fingers")
         return MotionOutcome(FailureCode.TIMEOUT, "the fingers did not settle")
 
-    def _run(self, stop: threading.Event, done) -> bool:
+    def _run(self, stop: threading.Event, done, extra_steps: int = 0) -> bool:
         """Step one control period at a time until ``done()`` or stop.
 
-        Returns True when ``done()`` became true before the settle time ran out.
+        ``done()`` runs after each step and may set the next targets. Returns True
+        when it became true within ``extra_steps`` plus the settle time.
         """
         start = time.monotonic()
-        for i in range(1, self._settle_steps + 1):
+        for i in range(1, extra_steps + self._settle_steps + 1):
             if stop.is_set():
                 return False
             with self._lock:
@@ -182,30 +205,6 @@ class SharpaMujocoBackend(RobotBackend):
             self._data.qvel[h.finger_dofs] = 0.0
 
     # Kinematics
-
-    def _solve_base(self, h: _Hand, target: Pose) -> np.ndarray | None:
-        """Base joint values that put the palm at ``target`` (damped least squares)."""
-        data = mujoco.MjData(self._model)
-        data.qpos[:] = self._data.qpos
-        goal_pos = np.asarray(target.position, dtype=float)
-        goal_quat = np.asarray(target.orientation, dtype=float)
-        lower = self._model.jnt_range[self._model.dof_jntid[h.base_dofs], 0]
-        upper = self._model.jnt_range[self._model.dof_jntid[h.base_dofs], 1]
-        jacp = np.zeros((3, self._model.nv))
-        jacr = np.zeros((3, self._model.nv))
-        error = np.zeros(6)
-        for _ in range(100):
-            mujoco.mj_kinematics(self._model, data)
-            mujoco.mj_comPos(self._model, data)
-            error[:3] = goal_pos - data.xpos[h.palm_body]
-            mujoco.mju_subQuat(error[3:], goal_quat, data.xquat[h.palm_body])
-            if np.linalg.norm(error[:3]) < 1e-5 and np.linalg.norm(error[3:]) < 1e-5:
-                return data.qpos[h.base_qpos].copy()
-            mujoco.mj_jacBody(self._model, data, jacp, jacr, h.palm_body)
-            jac = np.vstack((jacp, jacr))[:, h.base_dofs]
-            step = jac.T @ np.linalg.solve(jac @ jac.T + 1e-6 * np.eye(6), error)
-            data.qpos[h.base_qpos] = np.clip(data.qpos[h.base_qpos] + step, lower, upper)
-        return None
 
     def _pose_error(self, h: _Hand, target: Pose) -> tuple[float, float]:
         pos_err = np.linalg.norm(np.asarray(target.position) - self._data.xpos[h.palm_body])
@@ -269,6 +268,7 @@ class SharpaMujocoBackend(RobotBackend):
             geom_part[g] = PALM if part in ("hand", "root") else part
         return _Hand(
             palm_body=palm,
+            base_joints=tuple(m.joint(j).name for j in base_joints),
             base_qpos=m.jnt_qposadr[base_joints],
             base_dofs=m.jnt_dofadr[base_joints],
             base_actuators=np.array([_actuator(m, j) for j in base_joints]),

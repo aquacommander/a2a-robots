@@ -43,7 +43,7 @@ Every skill returns the same result, as JSON text and as an `application/json` d
 - A move larger than `max_step_m` or `max_step_rad`, or a target outside the workspace box, is refused before anything moves. The result includes the limits. Moves are never clamped.
 - One skill runs at a time per robot. A second motion request fails at once with `busy` instead of queueing.
 - `stop`, `tasks/cancel`, timeouts and shutdown all stop the backend. Backends run in a worker thread and poll a stop flag every control step, so stopping does not depend on cancelling a Python task.
-- Only the target pose is checked, not the path to it. That is fine in simulation; real hardware also needs the robot's own path and collision checks.
+- The adapter checks only the target pose. The path to it is the planner's job (see below); `MujocoPlanner` rejects paths that collide with the simulated scene. Real hardware also needs the robot's own safety checks.
 - `serve_robot()` binds `127.0.0.1` by default, because anyone who can reach the server can move the robot.
 
 ## Quick start
@@ -63,6 +63,10 @@ curl -s http://127.0.0.1:9100/ -H 'Content-Type: application/json' -d '{
 ## Adding a robot
 
 This repository is a monorepo. The shared package stays `a2a-robots`; each real robot is a sibling package named `a2a-robots-<name>` (for example `a2a-robots-sharpa`) that depends on it. `FakeBackend` stays in the core package only as a dependency-free test double.
+
+### Planning
+
+Arms such as Sharpa D01 take joint position targets, with planning and collision checking on the host. `a2a_robots.planning` defines that layer: a `Planner` turns a pose target into a `JointTrajectory` (one target per control step for the joints that carry the hand), and the backend streams it, checking the stop flag between targets. A planner reports "no safe path" by raising `PlanError`, which becomes a completed skill with `success: false`. `interpolate()` gives a speed-limited, smooth joint-space path for planners to build on. Any planner can be plugged in: `MujocoPlanner` today, a ROS 2 or Isaac planner later.
 
 A robot package subclasses `RobotBackend` and implements `hands`, `observe`, `move_to`, `open`, `close`, `hold` and `shutdown`. Motion methods are synchronous, run in a worker thread, and must check the `stop` event at every control step and return `MotionOutcome(FailureCode.STOPPED)` once it is set. See `src/a2a_robots/fake.py` and `packages/a2a-robots-sharpa`.
 
