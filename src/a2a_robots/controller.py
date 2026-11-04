@@ -14,7 +14,7 @@ import threading
 
 from .backend import MotionOutcome, RobotBackend
 from .limits import SafetyLimits
-from .skills import FailureCode, RequestError, Skill, SkillRequest, SkillResult
+from .skills import FailureCode, Pose, RequestError, Skill, SkillRequest, SkillResult
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,10 @@ class RobotController:
         self._busy_task: str | None = None
         self._stopping = 0
         self._worker: asyncio.Future[MotionOutcome] | None = None
+        # Target of each hand's last successful move. A backend stops within its
+        # settle tolerance, so the next step is measured from here instead of
+        # the observed pose. Cleared by anything that may leave the hand elsewhere.
+        self._commanded: dict[str, Pose] = {}
 
     async def run(self, request: SkillRequest, task_id: str | None) -> SkillResult:
         if request.skill is Skill.OBSERVE:
@@ -47,6 +51,7 @@ class RobotController:
             self._stop.set()
             await self._wait_for_worker()
             await asyncio.to_thread(self.backend.hold)
+            self._commanded.clear()
         finally:
             self._stopping -= 1
 
@@ -76,7 +81,8 @@ class RobotController:
             if request.skill is Skill.MOVE_TO:
                 assert request.hand is not None and request.pose is not None
                 states = await asyncio.to_thread(self.backend.observe)
-                refusal = self.limits.check_move(states[request.hand].pose, request.pose)
+                current = self._commanded.get(request.hand, states[request.hand].pose)
+                refusal = self.limits.check_move(current, request.pose)
                 if refusal is not None:
                     return await self._result(request.skill, *refusal, limits=True)
                 call = functools.partial(
@@ -86,7 +92,14 @@ class RobotController:
                 call = functools.partial(self.backend.open, request.hand, self._stop)
             else:
                 call = functools.partial(self.backend.close, request.hand, self._stop)
+            self._commanded.pop(request.hand, None)
             outcome = await self._run_worker(call)
+            if (
+                request.skill is Skill.MOVE_TO
+                and outcome.failure_code is None
+                and not self._stop.is_set()
+            ):
+                self._commanded[request.hand] = request.pose
             return await self._result(request.skill, outcome.failure_code, outcome.detail)
         finally:
             self._busy_task = None
