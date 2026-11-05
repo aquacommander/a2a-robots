@@ -30,9 +30,10 @@ SKILLS = [
 
 
 class FakeGoal(GoalHandle):
-    def __init__(self, goal, cancel_finishes):
+    def __init__(self, goal, cancel_finishes, cancel_fails):
         self.goal = goal
         self.cancel_finishes = cancel_finishes
+        self.cancel_fails = cancel_fails
         self.cancel_calls = 0
         self._done = asyncio.get_running_loop().create_future()
 
@@ -46,13 +47,16 @@ class FakeGoal(GoalHandle):
     async def cancel(self):
         self.cancel_calls += 1
         await asyncio.sleep(0)
+        if self.cancel_fails:
+            raise RosError("no answer from the action server")
         if self.cancel_finishes:
             self.finish("canceled")
 
 
 class FakeGateway(RosGateway):
     """Records calls. A goal runs ``script`` (feedback messages, then the
-    result) unless ``script`` is None, in which case the test finishes it."""
+    result) unless ``script`` is None, in which case the test finishes it.
+    ``early_feedback`` is delivered before ``send_goal`` returns."""
 
     def __init__(self):
         self.prepared = None
@@ -62,6 +66,8 @@ class FakeGateway(RosGateway):
         self.accept.set()
         self.reject = False
         self.cancel_finishes = True
+        self.cancel_fails = False
+        self.early_feedback: list[dict] = []
         self.service_calls: list[dict] = []
         self.service_hangs = False
         self.topic: TopicSample | None = TopicSample({"x": 5.5, "theta": 0.0}, 0.04)
@@ -74,8 +80,10 @@ class FakeGateway(RosGateway):
         await self.accept.wait()
         if self.reject:
             raise RosError("goal rejected by the action server")
-        handle = FakeGoal(goal, self.cancel_finishes)
+        handle = FakeGoal(goal, self.cancel_finishes, self.cancel_fails)
         self.goals.append(handle)
+        for feedback in self.early_feedback:
+            on_feedback(feedback)
         if self.script is not None:
             asyncio.get_running_loop().create_task(self._run(handle, on_feedback, self.script))
         return handle
@@ -168,6 +176,20 @@ async def test_action_streams_accepted_feedback_and_result_lines(gateway):
         {"skill": "rotate", "status": "succeeded", "result": {"delta": 0.5}},
     ]
     assert gateway.goals[0].goal == {"theta": 1.57}
+
+
+async def test_feedback_sent_before_acceptance_follows_the_accepted_line(gateway):
+    gateway.early_feedback = [{"remaining": 2.0}]
+    task = await send(bridge(gateway, max_feedback_hz=None), text_part("rotate", theta=1.57))
+    assert [
+        line.get("status") or line["feedback"]["remaining"] for line in artifact_lines(task)
+    ] == [
+        "accepted",
+        2.0,
+        1.0,
+        0.5,
+        "succeeded",
+    ]
 
 
 async def test_feedback_is_throttled(gateway):
@@ -288,6 +310,54 @@ async def test_the_goal_is_not_cancelled_twice(gateway):
     with pytest.raises(asyncio.CancelledError):
         await run
     assert gateway.goals[0].cancel_calls == 1
+
+
+async def test_a_failed_cancel_is_reported_and_retried(gateway):
+    gateway.script = None
+    gateway.cancel_fails = True
+    adapter = bridge(gateway, stream_feedback=False)
+    run = asyncio.create_task(adapter.invoke(request("rotate", theta=1.0), context=ctx()))
+    await until(lambda: gateway.goals)
+
+    with pytest.raises(RosError, match="cancelling the goal failed.*may still be running"):
+        await adapter.cancel(context=ctx())
+    goal = gateway.goals[0]
+    goal.cancel_fails = False
+    await adapter.close()  # the goal was not stopped, so close tries again
+    assert goal.cancel_calls == 2
+    with pytest.raises(CancelledByAdapterError):
+        await run
+
+
+async def test_a_cancel_that_times_out_is_not_treated_as_stopped(gateway):
+    gateway.script = None
+    gateway.accept.clear()
+    adapter = bridge(gateway, stream_feedback=False, cancel_timeout_s=0.01)
+    run = asyncio.create_task(adapter.invoke(request("rotate", theta=1.0), context=ctx()))
+    await asyncio.sleep(0.01)
+    gateway.accept.set()
+    await until(lambda: gateway.goals)
+    goal = gateway.goals[0]
+
+    async def hang():
+        goal.cancel_calls += 1
+        await asyncio.Event().wait()
+
+    goal.cancel = hang
+    with pytest.raises(RosError, match="may still be running"):
+        await adapter.cancel(context=ctx())
+    run.cancel()  # what the A2A server does next; it retries the cancel
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert goal.cancel_calls == 2
+
+
+async def test_a_goal_whose_timeout_cancel_fails_says_it_may_still_run(gateway):
+    gateway.script = None
+    gateway.cancel_fails = True
+    skills = [{**SKILLS[0], "timeout_s": 0.05}]
+    with pytest.raises(RosError, match="timed out after 0.05 s; cancelling the goal failed"):
+        await bridge(gateway, skills).invoke(request("rotate", theta=1.0), context=ctx())
 
 
 async def test_cancel_while_the_goal_is_being_sent_cancels_it_once_accepted(gateway):

@@ -41,7 +41,8 @@ class _Call:
     skill: SkillSpec
     goal: GoalHandle | None = None
     cancel_requested: bool = False
-    goal_cancelled: bool = False
+    goal_cancelled: bool = False  # set only once the server answered the cancel
+    cancelling: asyncio.Future[None] | None = None
 
 
 class Ros2BridgeAdapter(BaseA2AAdapter):
@@ -110,7 +111,8 @@ class Ros2BridgeAdapter(BaseA2AAdapter):
 
     async def cancel(self, context_id: str | None = None, **kwargs: Any) -> None:
         """Cancel the running goal and wait for the server's answer, so the
-        task is reported cancelled only after the robot was told to stop."""
+        task is reported cancelled only after the robot was told to stop.
+        Raises ``RosError`` if the goal may still be running."""
         call = self._calls.get(getattr(kwargs.get("context"), "task_id", None) or "")
         if call is None:
             return
@@ -118,7 +120,7 @@ class Ros2BridgeAdapter(BaseA2AAdapter):
         await self._cancel_goal(call)
 
     async def close(self) -> None:
-        await asyncio.gather(*(self._cancel_goal(call) for call in list(self._calls.values())))
+        await asyncio.gather(*(self._stop_goal(call) for call in list(self._calls.values())))
         await self._gateway.close()
 
     def get_metadata(self) -> AdapterMetadata:
@@ -173,34 +175,62 @@ class Ros2BridgeAdapter(BaseA2AAdapter):
     ) -> dict[str, Any]:
         skill = call.skill.id
         last_sent = -float("inf")
+        early: list[dict[str, Any]] | None = []  # feedback held until the accepted line
 
-        def on_feedback(feedback: dict[str, Any]) -> None:
+        def send_feedback(feedback: dict[str, Any]) -> None:
             nonlocal last_sent
             now = time.monotonic()
             if now - last_sent >= self._feedback_period_s:
                 last_sent = now
                 emit({"skill": skill, "feedback": feedback})
 
+        def on_feedback(feedback: dict[str, Any]) -> None:
+            if early is None:
+                send_feedback(feedback)
+            else:
+                early.append(feedback)
+
         try:
             call.goal = await self._gateway.send_goal(call.skill, args, on_feedback)
             if call.cancel_requested:  # tasks/cancel arrived while the goal was being sent
-                await self._cancel_goal(call)
+                await self._stop_goal(call)
             emit({"skill": skill, "status": "accepted"})
+            held, early = early, None
+            for feedback in held:
+                send_feedback(feedback)
             outcome = await call.goal.result()
         except asyncio.CancelledError:
             # tasks/cancel, a timeout or shutdown: the goal must not keep running.
-            await self._cancel_goal(call)
+            await self._stop_goal(call)
             raise
         return {"skill": skill, "status": outcome.status, "result": outcome.result}
 
     async def _cancel_goal(self, call: _Call) -> None:
-        if call.goal is None or call.goal_cancelled:
+        """Cancel the goal, sharing one request between callers that ask at
+        the same time. A failed cancel is retried by the next caller."""
+        goal = call.goal
+        if goal is None or call.goal_cancelled:
             return
-        call.goal_cancelled = True
+        if call.cancelling is None:
+            call.cancelling = asyncio.ensure_future(
+                asyncio.wait_for(goal.cancel(), self._cancel_timeout_s)
+            )
+        cancelling = call.cancelling
         try:
-            await asyncio.wait_for(call.goal.cancel(), self._cancel_timeout_s)
+            await asyncio.shield(cancelling)
         except Exception as e:
-            logger.warning("Cancelling the %s goal failed: %r", call.skill.id, e)
+            if call.cancelling is cancelling:
+                call.cancelling = None
+            raise RosError(
+                f"{call.skill.id}: cancelling the goal failed ({e!r}); it may still be running"
+            ) from e
+        call.goal_cancelled = True
+
+    async def _stop_goal(self, call: _Call) -> None:
+        try:
+            await self._cancel_goal(call)
+        except RosError as e:
+            logger.warning("%s", e)
 
     def _parse(self, payload: Any) -> tuple[SkillSpec, dict[str, Any]]:
         known = ", ".join(self.skills)
@@ -238,8 +268,10 @@ def _timeout_detail(call: _Call) -> str:
     after = f"{spec.timeout_s:g} s"
     if spec.kind is Kind.ACTION and call.goal is None:
         return f"{spec.id}: no goal was accepted within {after}; is {spec.ros_name} running?"
-    if spec.kind is Kind.ACTION:
+    if spec.kind is Kind.ACTION and call.goal_cancelled:
         return f"{spec.id}: timed out after {after}; the goal was cancelled"
+    if spec.kind is Kind.ACTION:
+        return f"{spec.id}: timed out after {after}; cancelling the goal failed, it may still run"
     if spec.kind is Kind.SERVICE:
         return f"{spec.id}: no response within {after}; the call may still complete on the robot"
     return f"{spec.id}: no message on {spec.ros_name} within {after}"
