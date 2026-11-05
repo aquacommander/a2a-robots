@@ -8,6 +8,7 @@ Built on [a2a-adapter](https://github.com/hybroai/a2a-adapter). Early developmen
 | --- | --- |
 | `a2a-robots` (this directory) | The core: skills, safety limits, the controller, the A2A adapter, and `FakeBackend`. |
 | [`a2a-robots-sharpa`](packages/a2a-robots-sharpa) | Sharpa Wave hands, simulated in MuJoCo. |
+| [`a2a-robots-ros2`](packages/a2a-robots-ros2) | An allowlisted ROS 2 bridge for bring-up and debugging. Not the typed skill contract. |
 
 ## Skills
 
@@ -77,6 +78,7 @@ A robot package subclasses `RobotBackend` and implements `hands`, `observe`, `mo
 uv sync --all-packages --extra dev
 uv run ruff format --check . && uv run ruff check .
 uv run pytest
+uv run pytest packages/a2a-robots-ros2
 uv run pytest packages/a2a-robots-sharpa
 ```
 
