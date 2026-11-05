@@ -4,7 +4,7 @@ An allowlisted ROS 2 bridge for [a2a-robots](../../README.md): it exposes the RO
 
 This is not the typed robot skill agent. `a2a_robots.RobotAdapter` gives planners one contract (`move_to`, `stop`, the busy rule, safety limits, one result shape) on any robot; this bridge passes configured ROS calls through and adds no safety limits of its own. Anything physical, such as joint limits or an emergency stop, stays in the robot's ROS stack.
 
-This release has the bridge and the interface to ROS (`RosGateway`). The rclpy gateway that talks to a live ROS 2 graph comes next.
+The bridge talks to ROS only through the `RosGateway` interface. `RclpyGateway` implements it for a live ROS 2 graph.
 
 ## Allowlist
 
@@ -12,6 +12,7 @@ Each entry maps one skill to one ROS interface. Nothing else can be reached thro
 
 ```python
 from a2a_robots_ros2 import Ros2BridgeAdapter, serve_bridge
+from a2a_robots_ros2.rclpy_gateway import RclpyGateway
 
 skills = [
     {
@@ -24,7 +25,7 @@ skills = [
     {"id": "spawn", "kind": "service", "ros_name": "/spawn", "type": "turtlesim/srv/Spawn"},
     {"id": "pose", "kind": "topic", "ros_name": "/turtle1/pose", "type": "turtlesim/msg/Pose"},
 ]
-serve_bridge(Ros2BridgeAdapter(skills, gateway))  # http://127.0.0.1:9200/
+serve_bridge(Ros2BridgeAdapter(skills, RclpyGateway()))  # http://127.0.0.1:9200/
 ```
 
 | Field | Meaning |
@@ -68,11 +69,35 @@ Feedback is streamed by default. The reply is then newline-delimited JSON in the
 
 rclpy is not on PyPI. It comes with a ROS 2 install and is built for that distribution's Python, so it is not a dependency of this package. ROS 2 Jazzy (Python 3.12) and newer are supported; Humble (Python 3.10) is below the Python 3.11 minimum.
 
+To use `RclpyGateway`, source ROS 2 and use a virtual environment on the ROS Python that can see its packages:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+uv venv --system-site-packages --python /usr/bin/python3
+uv pip install ./packages/a2a-robots-ros2  # from a checkout of this repository
+```
+
+`RclpyGateway(node_name="a2a_ros2_bridge")` creates one node in its own rclpy context and spins it on a background thread, so ROS callbacks never block the A2A server. The interface packages named in the allowlist (for example `turtlesim`) must be installed and sourced.
+
+- Topics are read with the sensor-data QoS (best effort, keep last 5), which matches both reliable and best-effort publishers. A read returns the latest message, or waits for the first one.
+- Args are set with `rosidl_runtime_py.set_message_fields`; a field that does not fit the message fails the task without calling ROS.
+- The bridge waits for an action or service server within the skill's `timeout_s`.
+
 ## Tests
 
-The tests use a fake `RosGateway`, so they need no ROS install:
+The bridge tests use a fake `RosGateway`, so they need no ROS install:
 
 ```bash
 uv sync --all-packages --extra dev
 uv run pytest packages/a2a-robots-ros2
+```
+
+The `RclpyGateway` tests run against a live graph and are skipped without rclpy. CI runs them in the `ros:jazzy-ros-base` image with `ros-jazzy-example-interfaces` installed:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export UV_PROJECT_ENVIRONMENT=/opt/a2a-venv
+uv venv --system-site-packages --python /usr/bin/python3 "$UV_PROJECT_ENVIRONMENT"
+uv sync --frozen --all-packages --extra dev
+A2A_ROBOTS_REQUIRE_ROS=1 uv run pytest packages/a2a-robots-ros2
 ```

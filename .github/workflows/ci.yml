@@ -33,3 +33,23 @@ jobs:
       - run: uv run pytest packages/a2a-robots-sharpa
         env:
           SHARPA_MODEL_DIR: ${{ runner.temp }}/sharpa-model
+
+  ros2-jazzy:
+    # RclpyGateway against a live ROS 2 graph. rclpy comes from the ROS image,
+    # so the venv sees the system site-packages.
+    runs-on: ubuntu-latest
+    container: ros:jazzy-ros-base
+    env:
+      A2A_ROBOTS_REQUIRE_ROS: "1"
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+      UV_PROJECT_ENVIRONMENT: /opt/a2a-venv
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends ros-jazzy-example-interfaces
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --system-site-packages --python /usr/bin/python3 "$UV_PROJECT_ENVIRONMENT"
+      - run: uv sync --frozen --all-packages --extra dev
+      - run: source /opt/ros/jazzy/setup.bash && uv run pytest packages/a2a-robots-ros2
