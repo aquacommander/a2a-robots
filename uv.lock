@@ -10,6 +10,7 @@ resolution-markers = [
 [manifest]
 members = [
     "a2a-robots",
+    "a2a-robots-ros2",
     "a2a-robots-sharpa",
 ]
 
@@ -54,6 +55,17 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "a2a-robots-ros2"
+version = "0.1.0"
+source = { editable = "packages/a2a-robots-ros2" }
+dependencies = [
+    { name = "a2a-adapter" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "a2a-adapter", specifier = ">=0.2.15,<0.3" }]
 
 [[package]]
 name = "a2a-robots-sharpa"
