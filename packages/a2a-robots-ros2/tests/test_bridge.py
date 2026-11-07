@@ -343,7 +343,11 @@ async def test_a_failed_cancel_over_json_rpc_fails_the_task(gateway):
         body = {"jsonrpc": "2.0", "id": "1", "method": "tasks/cancel", "params": {"id": task_id}}
         cancelled = (await client.post("/", json=body)).json()
         assert "may still be running" in cancelled["error"]["message"]
-        task = await rpc(client, "tasks/get", {"id": task_id})
+        for _ in range(100):  # the failed state is stored just after the reply
+            task = await rpc(client, "tasks/get", {"id": task_id})
+            if task["status"]["state"] != "working":
+                break
+            await asyncio.sleep(0.01)
         assert task["status"]["state"] == "failed"
 
 
