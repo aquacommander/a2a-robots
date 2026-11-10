@@ -27,6 +27,9 @@ _EXAMPLE_RESULT = (
 )
 
 
+SAFETY_LIMITS_EXTENSION = "https://github.com/hybroai/a2a-robots/extensions/safety-limits/v1"
+
+
 def _skill(skill_id: str, description: str, args: dict[str, Any]) -> dict[str, Any]:
     request = json.dumps({"skill": skill_id, "args": args})
     return {
@@ -45,7 +48,9 @@ SKILLS = [
     _skill(
         "move_to",
         "Move a hand to a pose. frame, units and orientation are required; "
-        "a move larger than the step limit is refused before anything moves.",
+        "a move larger than the step limit, or a target outside the workspace box, "
+        "is refused before anything moves. The limits are in the agent card's "
+        "safety-limits extension.",
         {"hand": "right", "pose": _EXAMPLE_POSE},
     ),
     _skill("open", "Open a hand.", {"hand": "right"}),
@@ -54,6 +59,24 @@ SKILLS = [
     ),
     _skill("stop", "Stop all motion now and freeze every hand. Always allowed.", {}),
 ]
+
+
+def _limits_extension(limits: SafetyLimits) -> dict[str, Any]:
+    """A data-only A2A extension that states the limits the adapter enforces."""
+    workspace = limits.workspace
+    return {
+        "uri": SAFETY_LIMITS_EXTENSION,
+        "description": "Safety limits this robot enforces before anything moves.",
+        "required": False,
+        "params": {
+            "frame": workspace.frame,
+            "workspace": {"min_xyz": list(workspace.min_xyz), "max_xyz": list(workspace.max_xyz)},
+            "max_step_m": limits.max_step_m,
+            "max_step_rad": limits.max_step_rad,
+            "skill_timeout_s": limits.skill_timeout_s,
+            "stop_timeout_s": limits.stop_timeout_s,
+        },
+    }
 
 
 class RobotAdapter(BaseA2AAdapter):
@@ -103,6 +126,7 @@ class RobotAdapter(BaseA2AAdapter):
             name=self._name,
             description=self._description,
             skills=SKILLS,
+            extensions=[_limits_extension(self.controller.limits)],
             input_modes=[JSON, "text/plain"],
             output_modes=[JSON, "text/plain"],
         )
